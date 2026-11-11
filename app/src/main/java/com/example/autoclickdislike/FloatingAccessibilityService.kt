@@ -256,7 +256,9 @@ class FloatingAccessibilityService : AccessibilityService() {
 
         val dm = resources.displayMetrics
         val pressX = dm.widthPixels / 2f
-        var pressY = dm.heightPixels / 2f
+        // 孔位上移到约 42% 屏高：足够触发视频长按，同时避开长按弹窗顶部
+        // （「分享给朋友」区域），即使小孔被误触也只落在视频上
+        var pressY = dm.heightPixels * 0.42f
 
         // 避免长按点落在悬浮按钮自身附近
         val p = layoutParams
@@ -269,7 +271,7 @@ class FloatingAccessibilityService : AccessibilityService() {
             }
         }
 
-        // 第一步：先上遮挡阻止用户触摸（孔对准长按注入点），再执行后续逻辑
+        // 第一步：先上开孔遮挡阻止用户触摸（孔对准长按注入点），再执行后续逻辑
         showShield(pressX, pressY)
 
         val current = rootInActiveWindow?.packageName?.toString()
@@ -285,15 +287,13 @@ class FloatingAccessibilityService : AccessibilityService() {
                 finishRun()
                 return@longPress
             }
-            // 遮挡已在位，轮询查找「不感兴趣」：
-            // 首查只等 100ms（弹窗动画未结束时节点往往已在控件树中），
-            // 之后每 60ms 轮询一次；最多 40 次约 2.4s 超时
+            // 轮询查找「不感兴趣」：首查只等 100ms（弹窗动画未结束时节点往往
+            // 已在控件树中），之后每 60ms 轮询一次；最多 40 次约 2.4s 超时
             var tries = 0
             fun poll() {
                 if (!busy) return
                 val node = findTargetNode()
                 if (node != null) {
-                    // 先撤遮挡再点击：两步同步执行无间隙，误触窗口趋近于零
                     hideShield()
                     clickNode(node)
                     toast("已点击「不感兴趣」")
@@ -311,6 +311,10 @@ class FloatingAccessibilityService : AccessibilityService() {
 
     // ---------------- 全屏触摸拦截层 ----------------
 
+    /**
+     * 全屏触摸拦截层：4 条色带围出中心小孔，孔仅供无障碍注入手势穿透，
+     * 用户触摸全被拦截。
+     */
     private fun showShield(pressX: Float, pressY: Float) {
         if (shieldViews.isNotEmpty()) return
         try {
@@ -318,42 +322,18 @@ class FloatingAccessibilityService : AccessibilityService() {
             val dm = resources.displayMetrics
             val screenW = dm.widthPixels
             val screenH = dm.heightPixels
+
             // 孔半径：仅供注入手势穿透，手指几乎不可能精确命中
             val hole = 24
             val holeL = (pressX - hole).toInt().coerceIn(0, screenW)
             val holeR = (pressX + hole).toInt().coerceIn(0, screenW)
             val holeT = (pressY - hole).toInt().coerceIn(0, screenH)
             val holeB = (pressY + hole).toInt().coerceIn(0, screenH)
-
-            fun addBand(x: Int, y: Int, bw: Int, bh: Int) {
-                if (bw <= 0 || bh <= 0) return
-                val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                else
-                    @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
-                val params = WindowManager.LayoutParams(
-                    bw, bh, type,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                    android.graphics.PixelFormat.TRANSLUCENT
-                ).apply {
-                    gravity = Gravity.TOP or Gravity.START
-                    this.x = x
-                    this.y = y
-                }
-                val view = View(this).apply {
-                    // 轻微变暗，提示「执行中」；触摸在本层被消费，不会落到下层 App
-                    background = android.graphics.drawable.ColorDrawable(0x28000000)
-                    setOnTouchListener { _, _ -> true }
-                }
-                shieldWm.addView(view, params)
-                shieldViews.add(view)
-            }
-
             // 上、下、左、右四条色带围出中心孔
-            addBand(0, 0, screenW, holeT)
-            addBand(0, holeB, screenW, screenH - holeB)
-            addBand(0, holeT, holeL, holeB - holeT)
-            addBand(holeR, holeT, screenW - holeR, holeB - holeT)
+            addShieldBand(shieldWm, 0, 0, screenW, holeT)
+            addShieldBand(shieldWm, 0, holeB, screenW, screenH - holeB)
+            addShieldBand(shieldWm, 0, holeT, holeL, holeB - holeT)
+            addShieldBand(shieldWm, holeR, holeT, screenW - holeR, holeB - holeT)
 
             // 硬超时兜底：任何异常路径卡死时强制恢复，防止屏幕被锁死
             shieldTimeout = Runnable {
@@ -362,8 +342,34 @@ class FloatingAccessibilityService : AccessibilityService() {
                     finishRun()
                 }
             }.also { mainHandler.postDelayed(it, SHIELD_TIMEOUT_MS) }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            toast("触摸拦截层添加失败：${e.message}")
         }
+    }
+
+    private fun addShieldBand(wm: WindowManager, x: Int, y: Int, bw: Int, bh: Int) {
+        if (bw <= 0 || bh <= 0) return
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        else
+            @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+        val params = WindowManager.LayoutParams(
+            bw, bh, type,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            android.graphics.PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            this.x = x
+            this.y = y
+        }
+        val view = View(this).apply {
+            // 轻微变暗，提示「执行中」；触摸在本层被消费，不会落到下层 App
+            background = android.graphics.drawable.ColorDrawable(0x28000000)
+            setOnTouchListener { _, _ -> true }
+        }
+        wm.addView(view, params)
+        shieldViews.add(view)
     }
 
     private fun hideShield() {
