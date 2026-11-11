@@ -60,10 +60,12 @@ class FloatingAccessibilityService : AccessibilityService() {
     private var sizePx = 0
     private var busy = false
 
-    // 执行期间的全屏触摸拦截层：4 条色带围出中心小孔，
-    // 孔仅供无障碍注入手势穿透，用户触摸全被拦截
-    private val shieldViews = mutableListOf<View>()
+    // 执行期间的全屏触摸拦截层（单个全屏 View，孔内放行、孔外消费触摸）
+    private var shieldView: View? = null
     private var shieldTimeout: Runnable? = null
+    private var shieldHoleX = 0f
+    private var shieldHoleY = 0f
+    private val shieldHoleRadius = 36f // 孔半径（含手指容差）
 
     private fun prefs(): SharedPreferences = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -312,28 +314,41 @@ class FloatingAccessibilityService : AccessibilityService() {
     // ---------------- 全屏触摸拦截层 ----------------
 
     /**
-     * 全屏触摸拦截层：4 条色带围出中心小孔，孔仅供无障碍注入手势穿透，
-     * 用户触摸全被拦截。
+     * 用单个全屏 View 做遮挡，孔内（长按注入点附近 36px）放行触摸让注入手势穿透，
+     * 其余区域全部消费——比 4 条独立窗口条带的 z-order 更稳定、不存在 relayout 间隙。
      */
     private fun showShield(pressX: Float, pressY: Float) {
-        if (shieldViews.isNotEmpty()) return
+        if (shieldView != null) return
         try {
-            val shieldWm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            val dm = resources.displayMetrics
-            val screenW = dm.widthPixels
-            val screenH = dm.heightPixels
-
-            // 孔半径：仅供注入手势穿透，手指几乎不可能精确命中
-            val hole = 24
-            val holeL = (pressX - hole).toInt().coerceIn(0, screenW)
-            val holeR = (pressX + hole).toInt().coerceIn(0, screenW)
-            val holeT = (pressY - hole).toInt().coerceIn(0, screenH)
-            val holeB = (pressY + hole).toInt().coerceIn(0, screenH)
-            // 上、下、左、右四条色带围出中心孔
-            addShieldBand(shieldWm, 0, 0, screenW, holeT)
-            addShieldBand(shieldWm, 0, holeB, screenW, screenH - holeB)
-            addShieldBand(shieldWm, 0, holeT, holeL, holeB - holeT)
-            addShieldBand(shieldWm, holeR, holeT, screenW - holeR, holeB - holeT)
+            shieldHoleX = pressX
+            shieldHoleY = pressY
+            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else
+                @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                type,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                android.graphics.PixelFormat.TRANSLUCENT
+            )
+            val view = View(this).apply {
+                // 轻微变暗提示「执行中」
+                background = android.graphics.drawable.ColorDrawable(0x28000000)
+                setOnTouchListener { _, event ->
+                    // 孔内放行（让无障碍注入的长按手势穿透），孔外消费防止误触
+                    val dx = event.x - shieldHoleX
+                    val dy = event.y - shieldHoleY
+                    val inHole = dx * dx + dy * dy <= shieldHoleRadius * shieldHoleRadius
+                    !inHole // 在孔内返回 false（不消费），孔外返回 true（消费）
+                }
+            }
+            wm.addView(view, params)
+            shieldView = view
 
             // 硬超时兜底：任何异常路径卡死时强制恢复，防止屏幕被锁死
             shieldTimeout = Runnable {
@@ -347,44 +362,16 @@ class FloatingAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun addShieldBand(wm: WindowManager, x: Int, y: Int, bw: Int, bh: Int) {
-        if (bw <= 0 || bh <= 0) return
-        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        else
-            @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
-        val params = WindowManager.LayoutParams(
-            bw, bh, type,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            android.graphics.PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            this.x = x
-            this.y = y
-        }
-        val view = View(this).apply {
-            // 轻微变暗，提示「执行中」；触摸在本层被消费，不会落到下层 App
-            background = android.graphics.drawable.ColorDrawable(0x28000000)
-            setOnTouchListener { _, _ -> true }
-        }
-        wm.addView(view, params)
-        shieldViews.add(view)
-    }
-
     private fun hideShield() {
         shieldTimeout?.let { mainHandler.removeCallbacks(it) }
         shieldTimeout = null
-        if (shieldViews.isNotEmpty()) {
-            val shieldWm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            shieldViews.forEach { v ->
-                try {
-                    shieldWm.removeView(v)
-                } catch (_: Exception) {
-                }
+        shieldView?.let {
+            try {
+                (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(it)
+            } catch (_: Exception) {
             }
-            shieldViews.clear()
         }
+        shieldView = null
     }
 
     private fun finishRun() {
