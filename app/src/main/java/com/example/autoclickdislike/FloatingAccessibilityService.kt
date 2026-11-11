@@ -60,12 +60,12 @@ class FloatingAccessibilityService : AccessibilityService() {
     private var sizePx = 0
     private var busy = false
 
-    // 执行期间的全屏触摸拦截层（单个全屏 View，孔内放行、孔外消费触摸）
+    // 执行期间的全屏触摸拦截层（无条件消费所有触摸）
     private var shieldView: View? = null
     private var shieldTimeout: Runnable? = null
     private var shieldHoleX = 0f
     private var shieldHoleY = 0f
-    private val shieldHoleRadius = 36f // 孔半径（含手指容差）
+    private val shieldHoleRadius = 36f // 仅视觉标记，onTouch 已不再区分
 
     private fun prefs(): SharedPreferences = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -289,15 +289,12 @@ class FloatingAccessibilityService : AccessibilityService() {
                 finishRun()
                 return@longPress
             }
-            // 关键：长按完成后快手弹窗已 addView 出来，它的 z-order 反超了我之前的
-            // 遮挡层——必须 remove + add 一次让遮挡层回到顶层，否则用户触摸会落
-            // 到弹窗上取消长按状态
+            // 双重保险：长按结束瞬间 + 轮询第一次各 reorder 一次
             reorderShield()
-            // 轮询查找「不感兴趣」：首查只等 100ms（弹窗动画未结束时节点往往
-            // 已在控件树中），之后每 60ms 轮询一次；最多 40 次约 2.4s 超时
             var tries = 0
             fun poll() {
                 if (!busy) return
+                if (tries == 0) reorderShield()
                 val node = findTargetNode()
                 if (node != null) {
                     hideShield()
@@ -315,7 +312,7 @@ class FloatingAccessibilityService : AccessibilityService() {
         }
     }
 
-    /** 把遮挡层从窗口系统移除再重新添加，确保它的 z-order 在所有 overlay 之上。 */
+    /** 把遮挡层 removeViewImmediate + addView，确保它的 z-order 在所有 overlay 之上。 */
     private fun reorderShield() {
         val v = shieldView ?: return
         try {
@@ -324,7 +321,6 @@ class FloatingAccessibilityService : AccessibilityService() {
             wm.removeViewImmediate(v)
             wm.addView(v, params)
         } catch (e: Exception) {
-            // 移除/重加可能因窗口瞬时不可见失败，静默忽略——下一次 updateLayout 会覆盖
         }
     }
 
@@ -351,20 +347,24 @@ class FloatingAccessibilityService : AccessibilityService() {
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                         WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                         WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                android.graphics.PixelFormat.TRANSLUCENT
+                android.graphics.PixelFormat.TRANSPARENT // TRANSLUCENT 在某些 ROM 上不接收触摸
             ).apply {
-                // 关键：显式设 gravity 为 TOP|START，否则默认 CENTER 导致
-                // View 本地坐标系原点在屏幕中心而不是 (0,0)，
-                // onTouchListener 里 event.x/y 与 shieldHoleX/Y 坐标不匹配
                 gravity = android.view.Gravity.TOP or android.view.Gravity.START
             }
             val view = HoleShieldView(this).apply {
+                isClickable = true  // 显式可点击，某些 ROM 上 TRANSPARENT View 需声明
+                isFocusable = true
                 setHole(shieldHoleX, shieldHoleY, shieldHoleRadius)
                 setOnTouchListener { _, event ->
-                    val dx = event.x - shieldHoleX
-                    val dy = event.y - shieldHoleY
-                    val inHole = dx * dx + dy * dy <= shieldHoleRadius * shieldHoleRadius
-                    !inHole
+                    val actionName = when (event.action) {
+                        android.view.MotionEvent.ACTION_DOWN -> "DOWN"
+                        android.view.MotionEvent.ACTION_MOVE -> "MOVE"
+                        android.view.MotionEvent.ACTION_UP -> "UP"
+                        android.view.MotionEvent.ACTION_CANCEL -> "CANCEL"
+                        else -> event.action.toString()
+                    }
+                    toast("✓ 遮罩收到 $actionName @(${event.x.toInt()},${event.y.toInt()})")
+                    true // 无条件消费
                 }
             }
             wm.addView(view, params)
