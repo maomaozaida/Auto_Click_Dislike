@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">自动不感兴趣</string>
+    <string name="accessibility_service_label">自动不感兴趣服务</string>
+    <string name="accessibility_service_desc">用于在快手/抖音内执行长按手势并点击「不感兴趣」，同时提供悬浮按钮。</string>
+</resources>
