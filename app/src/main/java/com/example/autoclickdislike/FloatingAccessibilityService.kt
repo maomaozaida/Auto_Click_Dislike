@@ -289,6 +289,10 @@ class FloatingAccessibilityService : AccessibilityService() {
                 finishRun()
                 return@longPress
             }
+            // 关键：长按完成后快手弹窗已 addView 出来，它的 z-order 反超了我之前的
+            // 遮挡层——必须 remove + add 一次让遮挡层回到顶层，否则用户触摸会落
+            // 到弹窗上取消长按状态
+            reorderShield()
             // 轮询查找「不感兴趣」：首查只等 100ms（弹窗动画未结束时节点往往
             // 已在控件树中），之后每 60ms 轮询一次；最多 40 次约 2.4s 超时
             var tries = 0
@@ -311,11 +315,24 @@ class FloatingAccessibilityService : AccessibilityService() {
         }
     }
 
+    /** 把遮挡层从窗口系统移除再重新添加，确保它的 z-order 在所有 overlay 之上。 */
+    private fun reorderShield() {
+        val v = shieldView ?: return
+        try {
+            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val params = v.layoutParams as WindowManager.LayoutParams
+            wm.removeViewImmediate(v)
+            wm.addView(v, params)
+        } catch (e: Exception) {
+            // 移除/重加可能因窗口瞬时不可见失败，静默忽略——下一次 updateLayout 会覆盖
+        }
+    }
+
     // ---------------- 全屏触摸拦截层 ----------------
 
     /**
-     * 用单个全屏 View 做遮挡，孔内（长按注入点附近 36px）放行触摸让注入手势穿透，
-     * 其余区域全部消费——比 4 条独立窗口条带的 z-order 更稳定、不存在 relayout 间隙。
+     * 用单个全屏 View 做遮挡，孔内（长按注入点附近）放行触摸让注入手势穿透，
+     * 其余区域全部消费。gravity 显式设 TOP|START 保证本地坐标=屏幕坐标。
      */
     private fun showShield(pressX: Float, pressY: Float) {
         if (shieldView != null) return
@@ -335,22 +352,24 @@ class FloatingAccessibilityService : AccessibilityService() {
                         WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                         WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 android.graphics.PixelFormat.TRANSLUCENT
-            )
-            val view = View(this).apply {
-                // 轻微变暗提示「执行中」
-                background = android.graphics.drawable.ColorDrawable(0x28000000)
+            ).apply {
+                // 关键：显式设 gravity 为 TOP|START，否则默认 CENTER 导致
+                // View 本地坐标系原点在屏幕中心而不是 (0,0)，
+                // onTouchListener 里 event.x/y 与 shieldHoleX/Y 坐标不匹配
+                gravity = android.view.Gravity.TOP or android.view.Gravity.START
+            }
+            val view = HoleShieldView(this).apply {
+                setHole(shieldHoleX, shieldHoleY, shieldHoleRadius)
                 setOnTouchListener { _, event ->
-                    // 孔内放行（让无障碍注入的长按手势穿透），孔外消费防止误触
                     val dx = event.x - shieldHoleX
                     val dy = event.y - shieldHoleY
                     val inHole = dx * dx + dy * dy <= shieldHoleRadius * shieldHoleRadius
-                    !inHole // 在孔内返回 false（不消费），孔外返回 true（消费）
+                    !inHole
                 }
             }
             wm.addView(view, params)
             shieldView = view
 
-            // 硬超时兜底：任何异常路径卡死时强制恢复，防止屏幕被锁死
             shieldTimeout = Runnable {
                 if (busy) {
                     toast("执行超时，已恢复触屏")
@@ -447,9 +466,45 @@ class FloatingAccessibilityService : AccessibilityService() {
             }
             n = n.parent
         }
-        // 找不到可点击节点时按坐标点击
         val rect = Rect()
         node.getBoundsInScreen(rect)
         tap(rect.exactCenterX(), rect.exactCenterY())
+    }
+
+    /**
+     * 自定义遮挡 View：Canvas 绘制半透明暗色底 + 孔位标记圈。
+     * 孔位圈在非 debug 场景设为 alpha=0 也可隐藏，当前保留便于验证。
+     */
+    private class HoleShieldView(context: Context) : View(context) {
+        private val bgPaint = android.graphics.Paint().apply {
+            color = 0x33000000.toInt() // 20% 不透明黑色，明显变暗但不阻挡视线
+            isAntiAlias = true
+        }
+        private val holeRingPaint = android.graphics.Paint().apply {
+            color = 0xAA00E676.toInt() // 半透明绿色描边标记孔位
+            style = android.graphics.Paint.Style.STROKE
+            strokeWidth = 3f
+            isAntiAlias = true
+        }
+        private val holeFillPaint = android.graphics.Paint().apply {
+            color = 0x3300E676.toInt() // 孔内淡绿色填充，视觉上标记"此区域不拦截"
+            isAntiAlias = true
+        }
+        private var hx = 0f
+        private var hy = 0f
+        private var hr = 36f
+
+        fun setHole(x: Float, y: Float, radius: Float) {
+            hx = x; hy = y; hr = radius
+            invalidate()
+        }
+
+        override fun onDraw(canvas: android.graphics.Canvas) {
+            super.onDraw(canvas)
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
+            // 在孔位置画一个圆形"切口"标记
+            canvas.drawCircle(hx, hy, hr, holeFillPaint)
+            canvas.drawCircle(hx, hy, hr, holeRingPaint)
+        }
     }
 }
