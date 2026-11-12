@@ -270,7 +270,12 @@ class MainActivity : AppCompatActivity() {
         colorRow.removeAllViews()
         val selected = currentColor()
         val dp = resources.displayMetrics.density
+        val cellSize = (40 * dp).toInt()
+        val dotSize = (30 * dp).toInt()
         PRESET_COLORS.forEach { color ->
+            // 每个颜色放在等宽单元格里居中，保证一行放得下、最后一个不被裁掉
+            val cell = android.widget.FrameLayout(this)
+            cell.layoutParams = LinearLayout.LayoutParams(0, cellSize, 1f)
             val view = android.view.View(this)
             val bg = android.graphics.drawable.GradientDrawable().apply {
                 shape = android.graphics.drawable.GradientDrawable.OVAL
@@ -280,15 +285,16 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             view.background = bg
-            view.layoutParams = LinearLayout.LayoutParams((36 * dp).toInt(), (36 * dp).toInt()).apply {
-                marginEnd = (14 * dp).toInt()
-            }
-            view.setOnClickListener {
+            cell.addView(
+                view,
+                android.widget.FrameLayout.LayoutParams(dotSize, dotSize, android.view.Gravity.CENTER)
+            )
+            cell.setOnClickListener {
                 prefs.edit().putInt(FloatingAccessibilityService.KEY_COLOR, color).apply()
                 pushConfig()
                 buildColorRow()
             }
-            colorRow.addView(view)
+            colorRow.addView(cell)
         }
     }
 
