@@ -26,7 +26,8 @@ class MainActivity : AppCompatActivity() {
             0xFF43A047.toInt(), // 绿
             0xFFFB8C00.toInt(), // 橙
             0xFF8E24AA.toInt(), // 紫
-            0xFF212121.toInt()  // 黑
+            0xFF212121.toInt(),  // 黑
+            0xFFFFFFFF.toInt()
         )
         private const val DEFAULT_SIZE_DP = 64
         private const val DEFAULT_COLOR = 0xFFE53935.toInt()

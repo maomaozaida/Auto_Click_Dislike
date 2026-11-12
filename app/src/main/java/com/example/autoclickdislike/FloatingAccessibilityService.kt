@@ -60,12 +60,12 @@ class FloatingAccessibilityService : AccessibilityService() {
     private var sizePx = 0
     private var busy = false
 
-    // 执行期间的全屏触摸拦截层（无条件消费所有触摸）
-    private var shieldView: View? = null
+    // 执行期间的触摸拦截层：
+    // 长按阶段 = 4 条带围孔（孔区域无窗口，注入手势才能穿透到快手）
+    // 弹窗阶段 = 实心全屏（点击用 performAction 不需要孔，用户触摸全拦截）
+    private val shieldBands = mutableListOf<View>()
+    private var solidShield: View? = null
     private var shieldTimeout: Runnable? = null
-    private var shieldHoleX = 0f
-    private var shieldHoleY = 0f
-    private val shieldHoleRadius = 36f // 仅视觉标记，onTouch 已不再区分
 
     private fun prefs(): SharedPreferences = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -289,12 +289,12 @@ class FloatingAccessibilityService : AccessibilityService() {
                 finishRun()
                 return@longPress
             }
-            // 双重保险：长按结束瞬间 + 轮询第一次各 reorder 一次
-            reorderShield()
+            // 长按完成：快手弹窗已弹出，换成实心全屏遮挡（最后 add 所以 z-order 最高），
+            // 后续点击「不感兴趣」走 performAction 节点级操作，不受遮挡影响
+            solidShield()
             var tries = 0
             fun poll() {
                 if (!busy) return
-                if (tries == 0) reorderShield()
                 val node = findTargetNode()
                 if (node != null) {
                     hideShield()
@@ -312,57 +312,30 @@ class FloatingAccessibilityService : AccessibilityService() {
         }
     }
 
-    /** 把遮挡层 removeViewImmediate + addView，确保它的 z-order 在所有 overlay 之上。 */
-    private fun reorderShield() {
-        val v = shieldView ?: return
-        try {
-            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            val params = v.layoutParams as WindowManager.LayoutParams
-            wm.removeViewImmediate(v)
-            wm.addView(v, params)
-        } catch (e: Exception) {
-        }
-    }
-
-    // ---------------- 全屏触摸拦截层 ----------------
+    // ---------------- 触摸拦截层（两阶段） ----------------
 
     /**
-     * 用单个全屏 View 做遮挡，孔内（长按注入点附近）放行触摸让注入手势穿透，
-     * 其余区域全部消费。gravity 显式设 TOP|START 保证本地坐标=屏幕坐标。
+     * 阶段 1：长按期间用 4 条带围出中心孔。
+     * 孔区域没有任何窗口覆盖，InputDispatcher 会把注入的长按手势直接发给快手；
+     * 条带区域消费用户触摸，防止误触。
      */
     private fun showShield(pressX: Float, pressY: Float) {
-        if (shieldView != null) return
+        if (shieldBands.isNotEmpty()) return
         try {
-            shieldHoleX = pressX
-            shieldHoleY = pressY
             val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else
-                @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
-            val params = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
-                type,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                android.graphics.PixelFormat.TRANSLUCENT
-            ).apply {
-                gravity = android.view.Gravity.TOP or android.view.Gravity.START
-            }
-            val view = HoleShieldView(this).apply {
-                setHole(shieldHoleX, shieldHoleY, shieldHoleRadius)
-                setOnTouchListener { _, event ->
-                    // 孔内 return false 放行——无障碍注入的长按手势落在孔里穿透到快手
-                    // 孔外 return true 消费——用户手指被拦截
-                    val dx = event.x - shieldHoleX
-                    val dy = event.y - shieldHoleY
-                    dx * dx + dy * dy > shieldHoleRadius * shieldHoleRadius
-                }
-            }
-            wm.addView(view, params)
-            shieldView = view
+            val dm = resources.displayMetrics
+            val screenW = dm.widthPixels
+            val screenH = dm.heightPixels
+
+            val hole = 36
+            val holeL = (pressX - hole).toInt().coerceIn(0, screenW)
+            val holeR = (pressX + hole).toInt().coerceIn(0, screenW)
+            val holeT = (pressY - hole).toInt().coerceIn(0, screenH)
+            val holeB = (pressY + hole).toInt().coerceIn(0, screenH)
+            addBand(wm, 0, 0, screenW, holeT)                 // 上
+            addBand(wm, 0, holeB, screenW, screenH - holeB)   // 下
+            addBand(wm, 0, holeT, holeL, holeB - holeT)       // 左
+            addBand(wm, holeR, holeT, screenW - holeR, holeB - holeT) // 右
 
             shieldTimeout = Runnable {
                 if (busy) {
@@ -375,16 +348,71 @@ class FloatingAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun addBand(wm: WindowManager, x: Int, y: Int, bw: Int, bh: Int) {
+        if (bw <= 0 || bh <= 0) return
+        val params = WindowManager.LayoutParams(
+            bw, bh, overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            android.graphics.PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            this.x = x
+            this.y = y
+        }
+        val view = View(this).apply {
+            background = android.graphics.drawable.ColorDrawable(0x33000000)
+            setOnTouchListener { _, _ -> true }
+        }
+        wm.addView(view, params)
+        shieldBands.add(view)
+    }
+
+    /** 阶段 2：移除条带，换成实心全屏遮挡（此时不需要孔，点击走 performAction）。 */
+    private fun solidShield() {
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        shieldBands.forEach { v ->
+            try { wm.removeViewImmediate(v) } catch (_: Exception) {}
+        }
+        shieldBands.clear()
+        if (solidShield != null) return
+        try {
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                overlayType(),
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                android.graphics.PixelFormat.TRANSLUCENT
+            ).apply { gravity = Gravity.TOP or Gravity.START }
+            val view = View(this).apply {
+                background = android.graphics.drawable.ColorDrawable(0x33000000)
+                setOnTouchListener { _, _ -> true }
+            }
+            wm.addView(view, params)
+            solidShield = view
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun overlayType() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+    else
+        @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+
     private fun hideShield() {
         shieldTimeout?.let { mainHandler.removeCallbacks(it) }
         shieldTimeout = null
-        shieldView?.let {
-            try {
-                (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(it)
-            } catch (_: Exception) {
-            }
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        shieldBands.forEach { v ->
+            try { wm.removeView(v) } catch (_: Exception) {}
         }
-        shieldView = null
+        shieldBands.clear()
+        solidShield?.let {
+            try { wm.removeView(it) } catch (_: Exception) {}
+        }
+        solidShield = null
     }
 
     private fun finishRun() {
@@ -463,42 +491,5 @@ class FloatingAccessibilityService : AccessibilityService() {
         val rect = Rect()
         node.getBoundsInScreen(rect)
         tap(rect.exactCenterX(), rect.exactCenterY())
-    }
-
-    /**
-     * 自定义遮挡 View：Canvas 绘制半透明暗色底 + 孔位标记圈。
-     * 孔位圈在非 debug 场景设为 alpha=0 也可隐藏，当前保留便于验证。
-     */
-    private class HoleShieldView(context: Context) : View(context) {
-        private val bgPaint = android.graphics.Paint().apply {
-            color = 0x33000000.toInt() // 20% 不透明黑色，明显变暗但不阻挡视线
-            isAntiAlias = true
-        }
-        private val holeRingPaint = android.graphics.Paint().apply {
-            color = 0xAA00E676.toInt() // 半透明绿色描边标记孔位
-            style = android.graphics.Paint.Style.STROKE
-            strokeWidth = 3f
-            isAntiAlias = true
-        }
-        private val holeFillPaint = android.graphics.Paint().apply {
-            color = 0x3300E676.toInt() // 孔内淡绿色填充，视觉上标记"此区域不拦截"
-            isAntiAlias = true
-        }
-        private var hx = 0f
-        private var hy = 0f
-        private var hr = 36f
-
-        fun setHole(x: Float, y: Float, radius: Float) {
-            hx = x; hy = y; hr = radius
-            invalidate()
-        }
-
-        override fun onDraw(canvas: android.graphics.Canvas) {
-            super.onDraw(canvas)
-            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
-            // 在孔位置画一个圆形"切口"标记
-            canvas.drawCircle(hx, hy, hr, holeFillPaint)
-            canvas.drawCircle(hx, hy, hr, holeRingPaint)
-        }
     }
 }
