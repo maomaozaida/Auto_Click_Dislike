@@ -255,7 +255,7 @@
             android:layout_marginTop="16dp"
             android:layout_marginBottom="24dp"
             android:lineSpacingExtra="4dp"
-            android:text="使用说明：\n1. 选择快手或抖音，并完成两项授权；\n2. 打开开关显示悬浮按钮（可拖动调整位置）；\n3. 在视频页点击悬浮按钮，会自动长按屏幕并点击「不感兴趣」；\n4. 仅适配快手长按弹窗页面，抖音页面如无效请反馈。"
+            android:text="使用说明：\n1. 选择快手或抖音，并完成两项授权；\n2. 打开开关后，悬浮按钮仅在所选应用全屏前台时显示（在桌面、其他应用、分屏状态下自动隐藏；本设置页可预览）；\n3. 在视频页点击悬浮按钮，会自动长按屏幕并点击「不感兴趣」；\n4. 悬浮按钮可拖动调整位置，松手后位置自动记忆。"
             android:textColor="#888888"
             android:textSize="13sp" />
 

@@ -102,7 +102,11 @@ class MainActivity : AppCompatActivity() {
                 FloatingAccessibilityService.TARGET_DY
             else
                 FloatingAccessibilityService.TARGET_KS
-            if (isChecked) prefs.edit().putString(FloatingAccessibilityService.KEY_TARGET, newTarget).apply()
+            if (isChecked) {
+                prefs.edit().putString(FloatingAccessibilityService.KEY_TARGET, newTarget).apply()
+                // 目标应用变了，重新判定悬浮按钮显隐
+                FloatingAccessibilityService.instance?.updateFloatVisibility()
+            }
         }
 
         // 悬浮窗权限
@@ -122,13 +126,12 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
 
-        // 悬浮按钮开关
+        // 悬浮按钮开关：打开后仅在快手/抖音全屏前台（或本设置页预览）显示
         switchShow.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean(FloatingAccessibilityService.KEY_ENABLED, checked).apply()
+            FloatingAccessibilityService.instance?.updateFloatVisibility()
             if (checked) {
-                FloatingAccessibilityService.instance?.showFloat()
-            } else {
-                FloatingAccessibilityService.instance?.hideFloat()
+                Toast.makeText(this, "已开启：仅在快手/抖音全屏显示", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -280,5 +283,7 @@ class MainActivity : AppCompatActivity() {
         switchShow.isEnabled = overlayOk && a11yOk
         switchShow.isChecked = a11yOk && overlayOk &&
                 prefs.getBoolean(FloatingAccessibilityService.KEY_ENABLED, false)
+        // 回到本页时重算一次显隐（本页允许预览悬浮按钮）
+        FloatingAccessibilityService.instance?.updateFloatVisibility()
     }
 }

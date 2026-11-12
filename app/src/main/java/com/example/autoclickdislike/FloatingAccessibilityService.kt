@@ -18,6 +18,7 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.FrameLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -78,9 +79,9 @@ class FloatingAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        if (prefs().getBoolean(KEY_ENABLED, false)) {
-            showFloat()
-        }
+        // 服务刚连上时窗口信息可能还没就绪，延后一次再判定
+        updateFloatVisibility()
+        mainHandler.postDelayed({ updateFloatVisibility() }, 500)
     }
 
     override fun onDestroy() {
@@ -97,10 +98,71 @@ class FloatingAccessibilityService : AccessibilityService() {
      * 立刻找「不感兴趣」节点 performAction 点击——不等轮询、不给误触时间窗。
      */
     override fun onAccessibilityEvent(event: android.view.accessibility.AccessibilityEvent?) {
-        if (!awaitPanel || event == null) return
+        if (event == null) return
+        // 前台窗口变化时判定悬浮窗该不该显示
+        if (event.eventType == android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            updateFloatVisibility()
+        }
+        if (!awaitPanel) return
         when (event.eventType) {
             android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
             android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> tryClick()
+        }
+    }
+
+    // ---------------- 前台全屏判定 ----------------
+
+    private fun targetPkgName(): String =
+        if (prefs().getString(KEY_TARGET, TARGET_KS) == TARGET_DY) PKG_DY else PKG_KS
+
+    /** 当前获得焦点的应用窗口 */
+    private fun activeAppWindow(): AccessibilityWindowInfo? {
+        return try {
+            windows.firstOrNull {
+                it.isActive && it.type == AccessibilityWindowInfo.TYPE_APPLICATION
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * 目标应用是否在前台全屏独占：
+     * 活跃应用窗口属于目标应用，且窗口尺寸基本覆盖整个屏幕（排除分屏/小窗/弹层）。
+     */
+    private fun isTargetFullscreen(): Boolean {
+        val win = activeAppWindow() ?: return false
+        val pkg = win.root?.packageName?.toString() ?: return false
+        if (pkg != targetPkgName()) return false
+        val dm = resources.displayMetrics
+        val b = Rect()
+        win.getBoundsInScreen(b)
+        return b.width() >= dm.widthPixels * 0.98f && b.height() >= dm.heightPixels * 0.9f
+    }
+
+    /** 是否应该显示悬浮按钮：开关打开 + 有悬浮窗权限 + 目标应用全屏前台（设置页内显示用于预览） */
+    private fun shouldShowFloat(): Boolean {
+        if (!prefs().getBoolean(KEY_ENABLED, false)) return false
+        if (!android.provider.Settings.canDrawOverlays(this)) return false
+        val win = activeAppWindow() ?: return false
+        val pkg = win.root?.packageName?.toString() ?: return false
+        if (pkg == packageName) return true          // 本设置页：允许预览
+        return isTargetFullscreen()
+    }
+
+    /** 按当前前台状态显示或隐藏悬浮按钮 */
+    fun updateFloatVisibility() {
+        // 执行过程中不改显隐，避免面板弹出导致按钮闪断
+        if (busy) return
+        if (shouldShowFloat()) {
+            if (floatView == null) {
+                try {
+                    showFloat()
+                } catch (_: Exception) {
+                }
+            }
+        } else if (floatView != null) {
+            removeFloatView()
         }
     }
 
@@ -403,6 +465,8 @@ class FloatingAccessibilityService : AccessibilityService() {
         busy = false
         awaitPanel = false
         setLabel("踩")
+        // 执行期间跳过显隐更新，结束后补一次（可能已离开目标应用）
+        updateFloatVisibility()
     }
 
     private fun longPress(x: Float, y: Float, durationMs: Long, callback: (Boolean) -> Unit) {
