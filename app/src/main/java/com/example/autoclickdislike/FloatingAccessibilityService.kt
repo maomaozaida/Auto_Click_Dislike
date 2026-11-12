@@ -347,24 +347,18 @@ class FloatingAccessibilityService : AccessibilityService() {
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                         WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                         WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                android.graphics.PixelFormat.TRANSPARENT // TRANSLUCENT 在某些 ROM 上不接收触摸
+                android.graphics.PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = android.view.Gravity.TOP or android.view.Gravity.START
             }
             val view = HoleShieldView(this).apply {
-                isClickable = true  // 显式可点击，某些 ROM 上 TRANSPARENT View 需声明
-                isFocusable = true
                 setHole(shieldHoleX, shieldHoleY, shieldHoleRadius)
                 setOnTouchListener { _, event ->
-                    val actionName = when (event.action) {
-                        android.view.MotionEvent.ACTION_DOWN -> "DOWN"
-                        android.view.MotionEvent.ACTION_MOVE -> "MOVE"
-                        android.view.MotionEvent.ACTION_UP -> "UP"
-                        android.view.MotionEvent.ACTION_CANCEL -> "CANCEL"
-                        else -> event.action.toString()
-                    }
-                    toast("✓ 遮罩收到 $actionName @(${event.x.toInt()},${event.y.toInt()})")
-                    true // 无条件消费
+                    // 孔内 return false 放行——无障碍注入的长按手势落在孔里穿透到快手
+                    // 孔外 return true 消费——用户手指被拦截
+                    val dx = event.x - shieldHoleX
+                    val dy = event.y - shieldHoleY
+                    dx * dx + dy * dy > shieldHoleRadius * shieldHoleRadius
                 }
             }
             wm.addView(view, params)
