@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.autoclickdislike"
         minSdk = 24
         targetSdk = 36
-        versionCode = 13
-        versionName = "0.2.1"
+        versionCode = 14
+        versionName = "0.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

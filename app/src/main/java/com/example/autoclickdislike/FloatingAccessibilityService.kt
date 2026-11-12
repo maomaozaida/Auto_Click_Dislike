@@ -32,11 +32,19 @@ class FloatingAccessibilityService : AccessibilityService() {
 
         const val PREFS = "float_cfg"
         const val KEY_ENABLED = "enabled"
-        const val KEY_SIZE_DP = "size_dp"
+        const val KEY_SIZE_DP = "size_dp" // 旧版统一大小，仅用于迁移默认值
+        const val KEY_WIDTH_DP = "width_dp"
+        const val KEY_HEIGHT_DP = "height_dp"
         const val KEY_COLOR = "color"
+        const val KEY_SHAPE = "shape"
+        const val KEY_SHOW_TEXT = "show_text"
         const val KEY_TARGET = "target"
         const val KEY_POS_X = "pos_x"
         const val KEY_POS_Y = "pos_y"
+
+        const val SHAPE_CIRCLE = 0
+        const val SHAPE_ROUND = 1
+        const val SHAPE_RECT = 2
 
         const val TARGET_KS = "ks"
         const val TARGET_DY = "dy"
@@ -57,7 +65,8 @@ class FloatingAccessibilityService : AccessibilityService() {
     private var floatView: FrameLayout? = null
     private var labelView: TextView? = null
     private var layoutParams: WindowManager.LayoutParams? = null
-    private var sizePx = 0
+    private var widthPx = 0
+    private var heightPx = 0
     private var busy = false
 
     // 长按完成、等待弹窗节点出现：此期间由无障碍事件驱动点击
@@ -108,14 +117,30 @@ class FloatingAccessibilityService : AccessibilityService() {
 
     // ---------------- 悬浮按钮 ----------------
 
+    /** 读取旧版统一大小作为宽高默认值（迁移兼容） */
+    private fun legacySize(): Int = prefs().getInt(KEY_SIZE_DP, DEFAULT_SIZE_DP)
+
+    private fun buildBg(color: Int, shape: Int, density: Float): GradientDrawable =
+        GradientDrawable().apply {
+            when (shape) {
+                SHAPE_CIRCLE -> this.shape = GradientDrawable.OVAL
+                SHAPE_ROUND -> {
+                    this.shape = GradientDrawable.RECTANGLE
+                    cornerRadius = 16f * density
+                }
+                else -> this.shape = GradientDrawable.RECTANGLE
+            }
+            setColor(color)
+        }
+
     fun showFloat() {
         if (floatView != null) return
         val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         this.wm = wm
 
-        val sizeDp = prefs().getInt(KEY_SIZE_DP, DEFAULT_SIZE_DP)
         val density = resources.displayMetrics.density
-        sizePx = (sizeDp * density).toInt()
+        widthPx = (prefs().getInt(KEY_WIDTH_DP, legacySize()) * density).toInt()
+        heightPx = (prefs().getInt(KEY_HEIGHT_DP, legacySize()) * density).toInt()
 
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -123,7 +148,7 @@ class FloatingAccessibilityService : AccessibilityService() {
             @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
         val params = WindowManager.LayoutParams(
-            sizePx, sizePx, type,
+            widthPx, heightPx, type,
             // LAYOUT_NO_LIMITS：允许拖到状态栏/导航栏等全部屏幕区域
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
@@ -138,11 +163,11 @@ class FloatingAccessibilityService : AccessibilityService() {
         layoutParams = params
 
         val view = FrameLayout(this)
-        val bg = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(prefs().getInt(KEY_COLOR, DEFAULT_COLOR))
-        }
-        view.background = bg
+        view.background = buildBg(
+            prefs().getInt(KEY_COLOR, DEFAULT_COLOR),
+            prefs().getInt(KEY_SHAPE, SHAPE_CIRCLE),
+            density
+        )
         view.elevation = 8f * density
 
         val label = TextView(this).apply {
@@ -150,6 +175,7 @@ class FloatingAccessibilityService : AccessibilityService() {
             setTextColor(Color.WHITE)
             textSize = 18f
             gravity = Gravity.CENTER
+            visibility = if (prefs().getBoolean(KEY_SHOW_TEXT, true)) View.VISIBLE else View.GONE
         }
         view.addView(
             label,
@@ -182,19 +208,20 @@ class FloatingAccessibilityService : AccessibilityService() {
         }
     }
 
-    fun applyConfig(sizeDp: Int, color: Int) {
+    fun applyConfig(widthDp: Int, heightDp: Int, color: Int, shape: Int, showText: Boolean) {
         val density = resources.displayMetrics.density
-        sizePx = (sizeDp * density).toInt()
+        widthPx = (widthDp * density).toInt()
+        heightPx = (heightDp * density).toInt()
         val view = floatView ?: return
-        val bg = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(color)
-        }
-        view.background = bg
+        view.background = buildBg(color, shape, density)
+        labelView?.visibility = if (showText) View.VISIBLE else View.GONE
         layoutParams?.let {
-            it.width = sizePx
-            it.height = sizePx
-            wm?.updateViewLayout(view, it)
+            it.width = widthPx
+            it.height = heightPx
+            try {
+                wm?.updateViewLayout(view, it)
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -214,11 +241,43 @@ class FloatingAccessibilityService : AccessibilityService() {
     // downX, downY, startX, startY, moved(0/1)
     private var touchState: FloatArray? = null
 
+    // 拖动节流：每帧（16ms）最多一次 updateViewLayout，pending 位置合并到下一帧
+    private var lastLayoutTime = 0L
+    private val pendingPos = IntArray(2)
+    private var pendingLayout: Runnable? = null
+
+    private fun scheduleLayout(v: View, p: WindowManager.LayoutParams) {
+        val now = android.os.SystemClock.uptimeMillis()
+        val elapsed = now - lastLayoutTime
+        if (elapsed >= 16) {
+            lastLayoutTime = now
+            try {
+                wm?.updateViewLayout(v, p)
+            } catch (_: Exception) {
+            }
+        } else if (pendingLayout == null) {
+            pendingLayout = Runnable {
+                pendingLayout = null
+                lastLayoutTime = android.os.SystemClock.uptimeMillis()
+                layoutParams?.let { lp ->
+                    lp.x = pendingPos[0]
+                    lp.y = pendingPos[1]
+                    try {
+                        wm?.updateViewLayout(v, lp)
+                    } catch (_: Exception) {
+                    }
+                }
+            }.also { mainHandler.postDelayed(it, 16 - elapsed) }
+        }
+    }
+
     private val touchListener = View.OnTouchListener { v, e ->
         val p = layoutParams ?: return@OnTouchListener false
         val slop = ViewConfiguration.get(this).scaledTouchSlop
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                pendingLayout?.let { mainHandler.removeCallbacks(it) }
+                pendingLayout = null
                 touchState = floatArrayOf(e.rawX, e.rawY, p.x.toFloat(), p.y.toFloat(), 0f)
                 true
             }
@@ -228,11 +287,15 @@ class FloatingAccessibilityService : AccessibilityService() {
                 val dy = e.rawY - st[1]
                 if (abs(dx) > slop || abs(dy) > slop) {
                     st[4] = 1f
-                    p.x = st[2].toInt() + dx.toInt()
-                    p.y = st[3].toInt() + dy.toInt()
-                    try {
-                        wm?.updateViewLayout(v, p)
-                    } catch (_: Exception) {
+                    val newX = st[2].toInt() + dx.toInt()
+                    val newY = st[3].toInt() + dy.toInt()
+                    // 位置没变化就跳过，避免无效窗口更新
+                    if (newX != p.x || newY != p.y) {
+                        p.x = newX
+                        p.y = newY
+                        pendingPos[0] = newX
+                        pendingPos[1] = newY
+                        scheduleLayout(v, p)
                     }
                 }
                 true
@@ -240,18 +303,24 @@ class FloatingAccessibilityService : AccessibilityService() {
             MotionEvent.ACTION_UP -> {
                 val st = touchState
                 touchState = null
+                pendingLayout?.let { mainHandler.removeCallbacks(it) }
+                pendingLayout = null
                 if (st != null && st[4] == 0f) {
                     execute()
                 } else {
-                    // 拖动结束，保存位置
-                    layoutParams?.let { p ->
-                        prefs().edit().putInt(KEY_POS_X, p.x).putInt(KEY_POS_Y, p.y).apply()
+                    // 拖动结束：最终位置落地 + 保存
+                    try {
+                        wm?.updateViewLayout(v, p)
+                    } catch (_: Exception) {
                     }
+                    prefs().edit().putInt(KEY_POS_X, p.x).putInt(KEY_POS_Y, p.y).apply()
                 }
                 true
             }
             MotionEvent.ACTION_CANCEL -> {
                 touchState = null
+                pendingLayout?.let { mainHandler.removeCallbacks(it) }
+                pendingLayout = null
                 true
             }
             else -> false
@@ -286,7 +355,7 @@ class FloatingAccessibilityService : AccessibilityService() {
         // 避免长按点落在悬浮按钮自身附近
         val p = layoutParams
         if (p != null) {
-            val btnRect = Rect(p.x, p.y, p.x + sizePx, p.y + sizePx)
+            val btnRect = Rect(p.x, p.y, p.x + widthPx, p.y + heightPx)
             val inflated = Rect(btnRect)
             inflated.inset(-80, -80)
             if (inflated.contains(pressX.toInt(), pressY.toInt())) {

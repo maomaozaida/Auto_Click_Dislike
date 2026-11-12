@@ -41,9 +41,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnOverlay: Button
     private lateinit var btnA11y: Button
     private lateinit var switchShow: SwitchMaterial
-    private lateinit var seekSize: SeekBar
+    private lateinit var seekWidth: SeekBar
+    private lateinit var seekHeight: SeekBar
+    private lateinit var tvWidthLabel: TextView
+    private lateinit var tvHeightLabel: TextView
+    private lateinit var toggleShape: MaterialButtonToggleGroup
+    private lateinit var switchText: SwitchMaterial
     private lateinit var colorRow: LinearLayout
     private lateinit var btnLaunch: Button
+
+    // 屏幕尺寸（dp），滑条拉满即平齐屏幕
+    private var screenWidthDp = 0
+    private var screenHeightDp = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -76,7 +85,12 @@ class MainActivity : AppCompatActivity() {
         btnOverlay = findViewById(R.id.btnOverlay)
         btnA11y = findViewById(R.id.btnA11y)
         switchShow = findViewById(R.id.switchShow)
-        seekSize = findViewById(R.id.seekSize)
+        seekWidth = findViewById(R.id.seekWidth)
+        seekHeight = findViewById(R.id.seekHeight)
+        tvWidthLabel = findViewById(R.id.tvWidthLabel)
+        tvHeightLabel = findViewById(R.id.tvHeightLabel)
+        toggleShape = findViewById(R.id.toggleShape)
+        switchText = findViewById(R.id.switchText)
         colorRow = findViewById(R.id.colorRow)
         btnLaunch = findViewById(R.id.btnLaunch)
 
@@ -118,19 +132,48 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 大小：进度 0-100 对应 40-140dp
-        val savedSize = prefs.getInt(FloatingAccessibilityService.KEY_SIZE_DP, DEFAULT_SIZE_DP)
-        seekSize.progress = savedSize - 40
-        seekSize.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+        // 宽高：40dp ~ 屏幕宽/高（dp），拉满平齐屏幕；旧版统一大小作为默认值迁移
+        val dm = resources.displayMetrics
+        screenWidthDp = (dm.widthPixels / dm.density).toInt()
+        screenHeightDp = (dm.heightPixels / dm.density).toInt()
+        val legacy = prefs.getInt(FloatingAccessibilityService.KEY_SIZE_DP, DEFAULT_SIZE_DP)
+        val savedW = prefs.getInt(FloatingAccessibilityService.KEY_WIDTH_DP, legacy)
+            .coerceIn(40, screenWidthDp)
+        val savedH = prefs.getInt(FloatingAccessibilityService.KEY_HEIGHT_DP, legacy)
+            .coerceIn(40, screenHeightDp)
+        seekWidth.max = (screenWidthDp - 40).coerceAtLeast(1)
+        seekHeight.max = (screenHeightDp - 40).coerceAtLeast(1)
+        seekWidth.progress = savedW - 40
+        seekHeight.progress = savedH - 40
+        tvWidthLabel.text = "宽度：${savedW}dp / 最大${screenWidthDp}dp"
+        tvHeightLabel.text = "高度：${savedH}dp / 最大${screenHeightDp}dp"
+
+        toggleShape.check(
+            when (prefs.getInt(FloatingAccessibilityService.KEY_SHAPE, 0)) {
+                1 -> R.id.btnShapeRound
+                2 -> R.id.btnShapeRect
+                else -> R.id.btnShapeCircle
+            }
+        )
+        toggleShape.addOnButtonCheckedListener { _, _, isChecked ->
+            if (isChecked) pushConfig()
+        }
+        switchText.isChecked = prefs.getBoolean(FloatingAccessibilityService.KEY_SHOW_TEXT, true)
+        switchText.setOnCheckedChangeListener { _, _ -> pushConfig() }
+
+        val seekListener = object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
-                val sizeDp = 40 + progress
-                prefs.edit().putInt(FloatingAccessibilityService.KEY_SIZE_DP, sizeDp).apply()
-                FloatingAccessibilityService.instance?.applyConfig(sizeDp, currentColor())
+                if (!fromUser) return
+                if (sb === seekWidth) tvWidthLabel.text = "宽度：${progress + 40}dp / 最大${screenWidthDp}dp"
+                else tvHeightLabel.text = "高度：${progress + 40}dp / 最大${screenHeightDp}dp"
+                pushConfig()
             }
 
             override fun onStartTrackingTouch(sb: SeekBar?) {}
             override fun onStopTrackingTouch(sb: SeekBar?) {}
-        })
+        }
+        seekWidth.setOnSeekBarChangeListener(seekListener)
+        seekHeight.setOnSeekBarChangeListener(seekListener)
 
         buildColorRow()
 
@@ -161,6 +204,25 @@ class MainActivity : AppCompatActivity() {
 
     private fun currentColor(): Int = prefs.getInt(FloatingAccessibilityService.KEY_COLOR, DEFAULT_COLOR)
 
+    /** 统一写配置并实时应用到悬浮窗 */
+    private fun pushConfig() {
+        val w = seekWidth.progress + 40
+        val h = seekHeight.progress + 40
+        val shape = when (toggleShape.checkedButtonId) {
+            R.id.btnShapeRound -> 1
+            R.id.btnShapeRect -> 2
+            else -> 0
+        }
+        val showText = switchText.isChecked
+        prefs.edit()
+            .putInt(FloatingAccessibilityService.KEY_WIDTH_DP, w)
+            .putInt(FloatingAccessibilityService.KEY_HEIGHT_DP, h)
+            .putInt(FloatingAccessibilityService.KEY_SHAPE, shape)
+            .putBoolean(FloatingAccessibilityService.KEY_SHOW_TEXT, showText)
+            .apply()
+        FloatingAccessibilityService.instance?.applyConfig(w, h, currentColor(), shape, showText)
+    }
+
     private fun buildColorRow() {
         colorRow.removeAllViews()
         val selected = currentColor()
@@ -180,14 +242,12 @@ class MainActivity : AppCompatActivity() {
             }
             view.setOnClickListener {
                 prefs.edit().putInt(FloatingAccessibilityService.KEY_COLOR, color).apply()
-                FloatingAccessibilityService.instance?.applyConfig(currentSizeDp(), color)
+                pushConfig()
                 buildColorRow()
             }
             colorRow.addView(view)
         }
     }
-
-    private fun currentSizeDp(): Int = 40 + seekSize.progress
 
     private fun isAccessibilityEnabled(): Boolean {
         val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
