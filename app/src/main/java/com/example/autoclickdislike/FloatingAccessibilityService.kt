@@ -124,7 +124,10 @@ class FloatingAccessibilityService : AccessibilityService() {
 
         val params = WindowManager.LayoutParams(
             sizePx, sizePx, type,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            // LAYOUT_NO_LIMITS：允许拖到状态栏/导航栏等全部屏幕区域
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START

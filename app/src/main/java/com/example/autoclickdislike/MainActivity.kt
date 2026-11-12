@@ -47,7 +47,26 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 沉浸式全屏：内容延伸到状态栏/导航栏区域，状态栏透明
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+        val night = resources.configuration.uiMode and
+                android.content.res.Configuration.UI_MODE_NIGHT_MASK ==
+                android.content.res.Configuration.UI_MODE_NIGHT_YES
+        androidx.core.view.WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = !night
+            isAppearanceLightNavigationBars = !night
+        }
         setContentView(R.layout.activity_main)
+
+        // 内容避开状态栏/导航栏（背景仍全屏延伸）
+        val root = findViewById<android.widget.ScrollView>(R.id.rootScroll)
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val bars = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.systemBars()
+            )
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
 
         prefs = getSharedPreferences(FloatingAccessibilityService.PREFS, Context.MODE_PRIVATE)
 
