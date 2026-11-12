@@ -191,24 +191,42 @@ class MainActivity : AppCompatActivity() {
 
         buildColorRow()
 
-        // 重置悬浮按钮位置（防拖出屏幕外卡住）
+        // 重置位置和大小
         findViewById<Button>(R.id.btnResetPos).setOnClickListener {
             prefs.edit()
                 .remove(FloatingAccessibilityService.KEY_POS_X)
                 .remove(FloatingAccessibilityService.KEY_POS_Y)
+                .remove(FloatingAccessibilityService.KEY_WIDTH_DP)
+                .remove(FloatingAccessibilityService.KEY_HEIGHT_DP)
                 .apply()
+            val defW = DEFAULT_SIZE_DP.coerceIn(40, screenWidthDp)
+            val defH = DEFAULT_SIZE_DP.coerceIn(40, screenHeightDp)
+            seekWidth.progress = defW - 40
+            seekHeight.progress = defH - 40
+            tvWidthLabel.text = "宽度：${defW}dp / 最大${screenWidthDp}dp"
+            tvHeightLabel.text = "高度：${defH}dp / 最大${screenHeightDp}dp"
+            pushConfig()
             FloatingAccessibilityService.instance?.resetPosition()
-            Toast.makeText(this, "悬浮按钮位置已重置", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "已重置位置和大小", Toast.LENGTH_SHORT).show()
         }
 
-        // 自动居中
-        findViewById<Button>(R.id.btnCenterPos).setOnClickListener {
+        // 水平居中 / 垂直居中
+        findViewById<Button>(R.id.btnCenterH).setOnClickListener {
             val inst = FloatingAccessibilityService.instance
             if (inst == null) {
                 Toast.makeText(this, "请先开启无障碍服务", Toast.LENGTH_SHORT).show()
             } else {
-                inst.centerPosition()
-                Toast.makeText(this, "悬浮按钮已居中", Toast.LENGTH_SHORT).show()
+                inst.centerHorizontal()
+                Toast.makeText(this, "已水平居中", Toast.LENGTH_SHORT).show()
+            }
+        }
+        findViewById<Button>(R.id.btnCenterV).setOnClickListener {
+            val inst = FloatingAccessibilityService.instance
+            if (inst == null) {
+                Toast.makeText(this, "请先开启无障碍服务", Toast.LENGTH_SHORT).show()
+            } else {
+                inst.centerVertical()
+                Toast.makeText(this, "已垂直居中", Toast.LENGTH_SHORT).show()
             }
         }
 

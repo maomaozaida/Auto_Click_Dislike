@@ -233,20 +233,35 @@
             android:gravity="center_vertical"
             android:orientation="horizontal" />
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnCenterH"
+                style="?attr/borderlessButtonStyle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="水平居中" />
+
+            <Button
+                android:id="@+id/btnCenterV"
+                style="?attr/borderlessButtonStyle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="垂直居中" />
+        </LinearLayout>
+
         <Button
             android:id="@+id/btnResetPos"
             style="?attr/borderlessButtonStyle"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="重置悬浮按钮位置" />
-
-        <Button
-            android:id="@+id/btnCenterPos"
-            style="?attr/borderlessButtonStyle"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="悬浮按钮自动居中" />
+            android:text="重置位置和大小" />
 
         <Button
             android:id="@+id/btnLaunch"
