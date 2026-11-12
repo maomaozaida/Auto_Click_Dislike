@@ -190,6 +190,17 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "悬浮按钮位置已重置", Toast.LENGTH_SHORT).show()
         }
 
+        // 自动居中
+        findViewById<Button>(R.id.btnCenterPos).setOnClickListener {
+            val inst = FloatingAccessibilityService.instance
+            if (inst == null) {
+                Toast.makeText(this, "请先开启无障碍服务", Toast.LENGTH_SHORT).show()
+            } else {
+                inst.centerPosition()
+                Toast.makeText(this, "悬浮按钮已居中", Toast.LENGTH_SHORT).show()
+            }
+        }
+
         // 打开所选应用
         btnLaunch.setOnClickListener {
             val target = prefs.getString(FloatingAccessibilityService.KEY_TARGET, FloatingAccessibilityService.TARGET_KS)

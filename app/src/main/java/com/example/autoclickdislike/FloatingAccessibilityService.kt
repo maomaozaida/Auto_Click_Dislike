@@ -270,6 +270,22 @@ class FloatingAccessibilityService : AccessibilityService() {
         }
     }
 
+    /** 悬浮按钮居中到屏幕正中 */
+    fun centerPosition() {
+        val dm = resources.displayMetrics
+        val x = ((dm.widthPixels - widthPx) / 2).coerceAtLeast(0)
+        val y = ((dm.heightPixels - heightPx) / 2).coerceAtLeast(0)
+        prefs().edit().putInt(KEY_POS_X, x).putInt(KEY_POS_Y, y).apply()
+        val p = layoutParams ?: return
+        val view = floatView ?: return
+        p.x = x
+        p.y = y
+        try {
+            wm?.updateViewLayout(view, p)
+        } catch (_: Exception) {
+        }
+    }
+
     fun applyConfig(widthDp: Int, heightDp: Int, color: Int, shape: Int, showText: Boolean) {
         val density = resources.displayMetrics.density
         widthPx = (widthDp * density).toInt()
