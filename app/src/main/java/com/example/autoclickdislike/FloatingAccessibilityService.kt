@@ -23,6 +23,7 @@ import android.widget.FrameLayout
 import android.widget.TextView
 import android.widget.Toast
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 class FloatingAccessibilityService : AccessibilityService() {
 
@@ -201,8 +202,8 @@ class FloatingAccessibilityService : AccessibilityService() {
         this.wm = wm
 
         val density = resources.displayMetrics.density
-        widthPx = (prefs().getInt(KEY_WIDTH_DP, legacySize()) * density).toInt()
-        heightPx = (prefs().getInt(KEY_HEIGHT_DP, legacySize()) * density).toInt()
+        widthPx = (prefs().getInt(KEY_WIDTH_DP, legacySize()) * density).roundToInt()
+        heightPx = (prefs().getInt(KEY_HEIGHT_DP, legacySize()) * density).roundToInt()
 
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -270,11 +271,25 @@ class FloatingAccessibilityService : AccessibilityService() {
         }
     }
 
+    /** 真实屏幕尺寸（含状态栏/导航栏），避免悬浮窗拉满后仍比屏幕小 */
+    private fun screenSize(): android.graphics.Point {
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val b = wm.currentWindowMetrics.bounds
+            android.graphics.Point(b.width(), b.height())
+        } else {
+            val p = android.graphics.Point()
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getRealSize(p)
+            p
+        }
+    }
+
     /** 悬浮按钮居中到屏幕正中 */
     fun centerPosition() {
-        val dm = resources.displayMetrics
-        val x = ((dm.widthPixels - widthPx) / 2).coerceAtLeast(0)
-        val y = ((dm.heightPixels - heightPx) / 2).coerceAtLeast(0)
+        val screen = screenSize()
+        val x = ((screen.x - widthPx) / 2).coerceAtLeast(0)
+        val y = ((screen.y - heightPx) / 2).coerceAtLeast(0)
         prefs().edit().putInt(KEY_POS_X, x).putInt(KEY_POS_Y, y).apply()
         val p = layoutParams ?: return
         val view = floatView ?: return
@@ -288,8 +303,8 @@ class FloatingAccessibilityService : AccessibilityService() {
 
     fun applyConfig(widthDp: Int, heightDp: Int, color: Int, shape: Int, showText: Boolean) {
         val density = resources.displayMetrics.density
-        widthPx = (widthDp * density).toInt()
-        heightPx = (heightDp * density).toInt()
+        widthPx = (widthDp * density).roundToInt()
+        heightPx = (heightDp * density).roundToInt()
         val view = floatView ?: return
         view.background = buildBg(color, shape, density)
         labelView?.visibility = if (showText) View.VISIBLE else View.GONE
@@ -424,11 +439,11 @@ class FloatingAccessibilityService : AccessibilityService() {
         val expectedPkg = if (target == TARGET_KS) PKG_KS else PKG_DY
         val appName = if (target == TARGET_KS) "快手" else "抖音"
 
-        val dm = resources.displayMetrics
-        val pressX = dm.widthPixels / 2f
-        // 孔位上移到约 42% 屏高：足够触发视频长按，同时避开长按弹窗顶部
+        val screen = screenSize()
+        val pressX = screen.x / 2f
+        // 长按点上移到约 42% 屏高：足够触发视频长按，同时避开长按弹窗顶部
         // （「分享给朋友」区域），即使小孔被误触也只落在视频上
-        var pressY = dm.heightPixels * 0.42f
+        var pressY = screen.y * 0.42f
 
         // 避免长按点落在悬浮按钮自身附近
         val p = layoutParams
@@ -437,7 +452,7 @@ class FloatingAccessibilityService : AccessibilityService() {
             val inflated = Rect(btnRect)
             inflated.inset(-80, -80)
             if (inflated.contains(pressX.toInt(), pressY.toInt())) {
-                pressY = dm.heightPixels / 4f
+                pressY = screen.y / 4f
             }
         }
 

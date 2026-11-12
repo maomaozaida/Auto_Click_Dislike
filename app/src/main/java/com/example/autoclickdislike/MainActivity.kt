@@ -135,10 +135,21 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 宽高：40dp ~ 屏幕宽/高（dp），拉满平齐屏幕；旧版统一大小作为默认值迁移
+        // 宽高：40dp ~ 真实屏幕宽/高（dp），拉满平齐屏幕；旧版统一大小作为默认值迁移
         val dm = resources.displayMetrics
-        screenWidthDp = (dm.widthPixels / dm.density).toInt()
-        screenHeightDp = (dm.heightPixels / dm.density).toInt()
+        // 用真实显示区域（含状态栏/导航栏），否则拉满也比屏幕小一圈
+        val real = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            val b = windowManager.currentWindowMetrics.bounds
+            android.graphics.Point(b.width(), b.height())
+        } else {
+            android.graphics.Point().also {
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay.getRealSize(it)
+            }
+        }
+        // 向上取整并 +1dp，保证拉满时窗口略大于屏幕，完全覆盖不留边
+        screenWidthDp = kotlin.math.ceil(real.x / dm.density).toInt() + 1
+        screenHeightDp = kotlin.math.ceil(real.y / dm.density).toInt() + 1
         val legacy = prefs.getInt(FloatingAccessibilityService.KEY_SIZE_DP, DEFAULT_SIZE_DP)
         val savedW = prefs.getInt(FloatingAccessibilityService.KEY_WIDTH_DP, legacy)
             .coerceIn(40, screenWidthDp)
