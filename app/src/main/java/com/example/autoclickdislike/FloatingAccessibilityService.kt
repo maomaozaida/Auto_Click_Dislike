@@ -60,12 +60,9 @@ class FloatingAccessibilityService : AccessibilityService() {
     private var sizePx = 0
     private var busy = false
 
-    // 执行期间的触摸拦截层：
-    // 长按阶段 = 4 条带围孔（孔区域无窗口，注入手势才能穿透到快手）
-    // 弹窗阶段 = 实心全屏（点击用 performAction 不需要孔，用户触摸全拦截）
-    private val shieldBands = mutableListOf<View>()
-    private var solidShield: View? = null
-    private var shieldTimeout: Runnable? = null
+    // 长按完成、等待弹窗节点出现：此期间由无障碍事件驱动点击
+    @Volatile
+    private var awaitPanel = false
 
     private fun prefs(): SharedPreferences = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -79,14 +76,35 @@ class FloatingAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         removeFloatView()
-        hideShield()
         instance = null
         super.onDestroy()
     }
 
     override fun onInterrupt() {}
 
-    override fun onAccessibilityEvent(event: android.view.accessibility.AccessibilityEvent?) {}
+    /**
+     * 事件驱动核心：长按完成后（awaitPanel=true），弹窗 Activity 一启动就会回调
+     * TYPE_WINDOW_STATE_CHANGED，此时 rootInActiveWindow 已是弹窗窗口，
+     * 立刻找「不感兴趣」节点 performAction 点击——不等轮询、不给误触时间窗。
+     */
+    override fun onAccessibilityEvent(event: android.view.accessibility.AccessibilityEvent?) {
+        if (!awaitPanel || event == null) return
+        when (event.eventType) {
+            android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+            android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> tryClick()
+        }
+    }
+
+    /** 找到目标节点就立即点击并收尾，返回是否成功。 */
+    private fun tryClick(): Boolean {
+        if (!busy) return false
+        val node = findTargetNode() ?: return false
+        awaitPanel = false
+        clickNode(node)
+        toast("已点击「不感兴趣」")
+        finishRun()
+        return true
+    }
 
     // ---------------- 悬浮按钮 ----------------
 
@@ -273,8 +291,13 @@ class FloatingAccessibilityService : AccessibilityService() {
             }
         }
 
-        // 第一步：先上开孔遮挡阻止用户触摸（孔对准长按注入点），再执行后续逻辑
-        showShield(pressX, pressY)
+        // 超时兜底：4 秒内没完成就恢复
+        mainHandler.postDelayed({
+            if (busy) {
+                toast("未找到「不感兴趣」入口")
+                finishRun()
+            }
+        }, SHIELD_TIMEOUT_MS)
 
         val current = rootInActiveWindow?.packageName?.toString()
         if (current != expectedPkg) {
@@ -289,135 +312,24 @@ class FloatingAccessibilityService : AccessibilityService() {
                 finishRun()
                 return@longPress
             }
-            // 长按完成：快手弹窗已弹出，换成实心全屏遮挡（最后 add 所以 z-order 最高），
-            // 后续点击「不感兴趣」走 performAction 节点级操作，不受遮挡影响
-            solidShield()
-            var tries = 0
-            fun poll() {
-                if (!busy) return
-                val node = findTargetNode()
-                if (node != null) {
-                    hideShield()
-                    clickNode(node)
-                    toast("已点击「不感兴趣」")
-                    finishRun()
-                } else if (tries++ < 40) {
-                    mainHandler.postDelayed({ poll() }, 60)
-                } else {
-                    toast("未找到「不感兴趣」入口，请在目标页面重试")
-                    finishRun()
-                }
+            // 长按完成后交给事件驱动：弹窗 Activity 启动时 onAccessibilityEvent 立即触发 tryClick
+            awaitPanel = true
+            // 先立即试一次：弹窗可能在长按完成前就已就绪
+            if (tryClick()) return@longPress
+            // 低频兜底轮询（每 250ms）：防止个别 ROM 事件延迟或漏发，
+            // 正常路径由事件驱动在弹窗出现瞬间完成，轮询只是保险
+            fun fallback() {
+                if (!busy || !awaitPanel) return
+                if (tryClick()) return
+                mainHandler.postDelayed({ fallback() }, 250)
             }
-            mainHandler.postDelayed({ poll() }, 100)
+            mainHandler.postDelayed({ fallback() }, 250)
         }
-    }
-
-    // ---------------- 触摸拦截层（两阶段） ----------------
-
-    /**
-     * 阶段 1：长按期间用 4 条带围出中心孔。
-     * 孔区域没有任何窗口覆盖，InputDispatcher 会把注入的长按手势直接发给快手；
-     * 条带区域消费用户触摸，防止误触。
-     */
-    private fun showShield(pressX: Float, pressY: Float) {
-        if (shieldBands.isNotEmpty()) return
-        try {
-            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            val dm = resources.displayMetrics
-            val screenW = dm.widthPixels
-            val screenH = dm.heightPixels
-
-            val hole = 36
-            val holeL = (pressX - hole).toInt().coerceIn(0, screenW)
-            val holeR = (pressX + hole).toInt().coerceIn(0, screenW)
-            val holeT = (pressY - hole).toInt().coerceIn(0, screenH)
-            val holeB = (pressY + hole).toInt().coerceIn(0, screenH)
-            addBand(wm, 0, 0, screenW, holeT)                 // 上
-            addBand(wm, 0, holeB, screenW, screenH - holeB)   // 下
-            addBand(wm, 0, holeT, holeL, holeB - holeT)       // 左
-            addBand(wm, holeR, holeT, screenW - holeR, holeB - holeT) // 右
-
-            shieldTimeout = Runnable {
-                if (busy) {
-                    toast("执行超时，已恢复触屏")
-                    finishRun()
-                }
-            }.also { mainHandler.postDelayed(it, SHIELD_TIMEOUT_MS) }
-        } catch (e: Exception) {
-            toast("触摸拦截层添加失败：${e.message}")
-        }
-    }
-
-    private fun addBand(wm: WindowManager, x: Int, y: Int, bw: Int, bh: Int) {
-        if (bw <= 0 || bh <= 0) return
-        val params = WindowManager.LayoutParams(
-            bw, bh, overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            android.graphics.PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            this.x = x
-            this.y = y
-        }
-        val view = View(this).apply {
-            background = android.graphics.drawable.ColorDrawable(0x33000000)
-            setOnTouchListener { _, _ -> true }
-        }
-        wm.addView(view, params)
-        shieldBands.add(view)
-    }
-
-    /** 阶段 2：移除条带，换成实心全屏遮挡（此时不需要孔，点击走 performAction）。 */
-    private fun solidShield() {
-        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        shieldBands.forEach { v ->
-            try { wm.removeViewImmediate(v) } catch (_: Exception) {}
-        }
-        shieldBands.clear()
-        if (solidShield != null) return
-        try {
-            val params = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
-                overlayType(),
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                android.graphics.PixelFormat.TRANSLUCENT
-            ).apply { gravity = Gravity.TOP or Gravity.START }
-            val view = View(this).apply {
-                background = android.graphics.drawable.ColorDrawable(0x33000000)
-                setOnTouchListener { _, _ -> true }
-            }
-            wm.addView(view, params)
-            solidShield = view
-        } catch (_: Exception) {
-        }
-    }
-
-    private fun overlayType() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-    else
-        @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
-
-    private fun hideShield() {
-        shieldTimeout?.let { mainHandler.removeCallbacks(it) }
-        shieldTimeout = null
-        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        shieldBands.forEach { v ->
-            try { wm.removeView(v) } catch (_: Exception) {}
-        }
-        shieldBands.clear()
-        solidShield?.let {
-            try { wm.removeView(it) } catch (_: Exception) {}
-        }
-        solidShield = null
     }
 
     private fun finishRun() {
         busy = false
-        hideShield()
+        awaitPanel = false
         setLabel("踩")
     }
 
